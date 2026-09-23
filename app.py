@@ -1,32 +1,30 @@
 # -*- coding: utf-8 -*-
-"""Browser interface for the three PI-MFS inference tasks.
-
-Run locally with:
-    python app.py
-"""
+"""Streamlit web interface for the three PI-MFS inference tasks."""
 
 from __future__ import annotations
 
 import html
 import os
 from pathlib import Path
+import shutil
+import tempfile
 import threading
 
-import gradio as gr
 import matplotlib
 
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import streamlit as st
 
 from inference_engine import InferenceResult, MambaInferenceEngine
 
 
-APP_TITLE = "PI-MFS Framework"
-REPOSITORY_URL = os.getenv("GITHUB_REPOSITORY_URL", "").strip()
-ENGINE = MambaInferenceEngine(device_preference=os.getenv("PI_MFS_DEVICE", "auto"))
-INFERENCE_LOCK = threading.RLock()
+ROOT = Path(__file__).resolve().parent
+MODEL_DIR = ROOT / "models"
+EXAMPLE_DIR = ROOT / "examples"
 
 POSITION_OPTIONS = {
     "Automatic position recognition": None,
@@ -37,78 +35,100 @@ POSITION_OPTIONS = {
     "Right bottom": 4,
 }
 
-
-CSS = """
-.gradio-container {
-    max-width: 1480px !important;
-    margin: 0 auto !important;
-    background: #f4f7fb !important;
-    color: #172033 !important;
+TASK_MODEL_KEYWORDS = {
+    1: ("task1", "pressure", "conditioned", "position", "force"),
+    2: ("task2", "static", "jingta"),
+    3: ("task3", "dynamic", "dongtai", "3d"),
 }
-.pi-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 24px;
-    margin: 8px 0 16px;
-    padding: 22px 26px;
-    border-radius: 16px;
-    color: white;
-    background: #07162d;
-}
-.pi-header h1 {
-    margin: 0 0 4px;
-    font-family: Georgia, 'Times New Roman', serif;
-    font-size: 32px;
-}
-.pi-header p { margin: 0; color: #d4e1ee; }
-.pi-header a {
-    padding: 10px 14px;
-    border: 1px solid rgba(255,255,255,.22);
-    border-radius: 9px;
-    color: white !important;
-    text-decoration: none;
-    white-space: nowrap;
-}
-.pi-card {
-    border: 1px solid #dce5ee !important;
-    border-radius: 14px !important;
-    background: white !important;
-    box-shadow: 0 16px 36px rgba(20,43,72,.07) !important;
-}
-.pi-input { padding: 6px !important; }
-.pi-output { padding: 6px !important; }
-.result-summary {
-    min-height: 112px;
-    padding: 16px 18px;
-    border: 1px solid #dce5ee;
-    border-radius: 12px;
-    background: #f8fafc;
-}
-.result-summary h2 {
-    margin: 0 0 8px;
-    color: #075f6c;
-    font-family: Georgia, 'Times New Roman', serif;
-    font-size: 38px;
-    line-height: 1.05;
-}
-.result-summary p { margin: 0; color: #53657a; }
-.task-note { color: #607086; font-size: 14px; line-height: 1.55; }
-footer { display: none !important; }
-@media (max-width: 720px) {
-    .pi-header { align-items: flex-start; flex-direction: column; }
-    .pi-header h1 { font-size: 27px; }
-}
-"""
 
 
-def _path_from_upload(value: str | Path | None, field_name: str) -> str:
-    if value is None or not str(value).strip():
-        raise gr.Error(f"Please select {field_name}.")
-    path = Path(str(value))
-    if not path.is_file():
-        raise gr.Error(f"The selected {field_name} is unavailable.")
-    return str(path)
+class Runtime:
+    def __init__(self) -> None:
+        self.engine = MambaInferenceEngine(
+            device_preference=os.getenv("PI_MFS_DEVICE", "auto")
+        )
+        self.lock = threading.RLock()
+
+
+@st.cache_resource(show_spinner=False)
+def get_runtime() -> Runtime:
+    return Runtime()
+
+
+def _files_under(directory: Path, suffixes: set[str]) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    return sorted(
+        (
+            path
+            for path in directory.rglob("*")
+            if path.is_file() and path.suffix.lower() in suffixes
+        ),
+        key=lambda path: path.as_posix().lower(),
+    )
+
+
+def _model_candidates(task_id: int) -> list[Path]:
+    all_models = _files_under(MODEL_DIR, {".pth", ".pt"})
+    keywords = TASK_MODEL_KEYWORDS[task_id]
+    matched = [
+        path
+        for path in all_models
+        if any(keyword in path.name.lower() for keyword in keywords)
+    ]
+    return matched or all_models
+
+
+def _example_candidates(task_id: int) -> list[Path]:
+    suffixes = {".tsv", ".txt", ".npy"} if task_id == 1 else {".npy"}
+    preferred = EXAMPLE_DIR / f"task{task_id}"
+    if preferred.is_dir():
+        return _files_under(preferred, suffixes)
+
+    all_examples = _files_under(EXAMPLE_DIR, suffixes)
+    tokens = {
+        1: ("task1", "pressure"),
+        2: ("task2", "static"),
+        3: ("task3", "dynamic"),
+    }[task_id]
+    matched = [
+        path
+        for path in all_examples
+        if any(token in path.as_posix().lower() for token in tokens)
+    ]
+    return matched or all_examples
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return path.relative_to(ROOT).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _save_upload(uploaded_file, temp_directories: list[Path]) -> Path:
+    temp_directory = Path(tempfile.mkdtemp(prefix="pi_mfs_"))
+    temp_directories.append(temp_directory)
+    safe_name = Path(uploaded_file.name).name
+    destination = temp_directory / safe_name
+    destination.write_bytes(uploaded_file.getbuffer())
+    return destination
+
+
+def _resolve_input(
+    source_mode: str,
+    repository_path: Path | None,
+    uploaded_file,
+    label: str,
+    temp_directories: list[Path],
+) -> Path:
+    if source_mode == "Repository file":
+        if repository_path is None or not Path(repository_path).is_file():
+            raise ValueError(f"No {label} was found in the repository.")
+        return Path(repository_path)
+    if uploaded_file is None:
+        raise ValueError(f"Please upload {label}.")
+    return _save_upload(uploaded_file, temp_directories)
 
 
 def _build_figure(result: InferenceResult):
@@ -127,12 +147,13 @@ def _build_figure(result: InferenceResult):
         aspect="equal",
         interpolation="nearest",
     )
-    response_titles = {
-        1: "Task 1 · Mean Strain Map",
-        2: "Task 2 · Static Response Map",
-        3: "Task 3 · Temporal Maximum Projection",
-    }
-    response_axes.set_title(response_titles[result.task_id])
+    response_axes.set_title(
+        {
+            1: "Task 1 · Mean Strain Map",
+            2: "Task 2 · Static Response Map",
+            3: "Task 3 · Temporal Maximum Projection",
+        }[result.task_id]
+    )
     response_axes.set_xlabel("Width")
     response_axes.set_ylabel("Height")
     colorbar = figure.colorbar(image, ax=response_axes, fraction=0.050, pad=0.04)
@@ -156,7 +177,13 @@ def _plot_regression(axes, result: InferenceResult) -> None:
 
     indices = np.arange(1, len(values) + 1)
     predicted_mean = float(result.details["force_n"])
-    axes.plot(indices, values, color="#168B9A", linewidth=1.0, label="Per-row prediction")
+    axes.plot(
+        indices,
+        values,
+        color="#168B9A",
+        linewidth=1.0,
+        label="Per-row prediction",
+    )
     axes.axhline(
         predicted_mean,
         color="#D95D39",
@@ -210,19 +237,7 @@ def _plot_probabilities(axes, result: InferenceResult) -> None:
     axes.grid(True, axis="y", alpha=0.20)
 
 
-def _result_summary(result: InferenceResult) -> str:
-    confidence_line = ""
-    if result.confidence is not None:
-        confidence_line = f"<br><b>Confidence:</b> {result.confidence * 100:.1f}%"
-    return (
-        '<div class="result-summary">'
-        f"<h2>{html.escape(result.primary_text)}</h2>"
-        f"<p>{html.escape(result.secondary_text)}{confidence_line}</p>"
-        "</div>"
-    )
-
-
-def _result_table(result: InferenceResult) -> list[list[str]]:
+def _result_rows(result: InferenceResult) -> list[list[str]]:
     if result.task_id == 1:
         rows = [
             ["Predicted force", f"{float(result.details['force_n']):.4f} N"],
@@ -250,198 +265,314 @@ def _result_table(result: InferenceResult) -> list[list[str]]:
     ]
 
 
-def _pack_result(result: InferenceResult):
-    return (
-        _result_summary(result),
-        _build_figure(result),
-        _result_table(result),
-        f"**Input summary:** {result.source_description}  \n**Device:** {ENGINE.device_name}",
+def _render_result(result: InferenceResult) -> None:
+    confidence = ""
+    if result.confidence is not None:
+        confidence = f"<strong>Confidence:</strong> {result.confidence * 100:.1f}%"
+    st.markdown(
+        f"""
+        <div class="result-box">
+          <div class="result-kicker">RECOGNITION RESULT</div>
+          <div class="result-value">{html.escape(result.primary_text)}</div>
+          <div class="result-detail">{html.escape(result.secondary_text)}</div>
+          <div class="result-confidence">{confidence}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    metric_columns = st.columns(4)
+    if result.task_id == 1:
+        metrics = [
+            ("Equivalent mass", f"{float(result.details['equivalent_grams']):.1f} g"),
+            ("Position", str(result.details["position"])),
+            ("Variation", f"±{float(result.details['force_std_n']):.4f} N"),
+            ("Inference rows", str(result.details["sample_count"])),
+        ]
+    else:
+        probabilities = result.details.get("class_probabilities", [])
+        metrics = [
+            ("Confidence", f"{float(result.confidence or 0.0) * 100:.1f}%"),
+            ("Classes", str(len(probabilities))),
+            ("Task", "Static" if result.task_id == 2 else "Dynamic"),
+            ("Device", get_runtime().engine.device_name),
+        ]
+    for column, (label, value) in zip(metric_columns, metrics):
+        column.metric(label, value)
+
+    figure = _build_figure(result)
+    st.pyplot(figure, use_container_width=True)
+    plt.close(figure)
+
+    table_title = "Metrics" if result.task_id == 1 else "Top-3 predictions"
+    st.markdown(f"#### {table_title}")
+    st.dataframe(
+        pd.DataFrame(_result_rows(result), columns=["Metric / Class", "Value / Probability"]),
+        hide_index=True,
+        use_container_width=True,
+    )
+    st.caption(f"{result.source_description} · {get_runtime().engine.device_name}")
+
+
+def _render_empty() -> None:
+    st.markdown(
+        """
+        <div class="empty-box">
+          <div class="empty-title">Ready for inference</div>
+          <div>Select a checkpoint and an input file, then run the task.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
 
-def run_pressure(model_file, input_file, max_rows, position_name):
-    model_path = _path_from_upload(model_file, "the Task 1 model checkpoint")
-    input_path = _path_from_upload(input_file, "the raw strain input")
-    rows = None if max_rows in (None, 0) else int(max_rows)
-    manual_position = POSITION_OPTIONS.get(position_name)
+def _run_task(
+    task_id: int,
+    model_mode: str,
+    model_repository_path: Path | None,
+    model_upload,
+    data_mode: str,
+    data_repository_path: Path | None,
+    data_upload,
+    max_rows: int | None = None,
+    position_name: str | None = None,
+) -> InferenceResult:
+    temp_directories: list[Path] = []
     try:
-        with INFERENCE_LOCK:
-            result = ENGINE.predict_task1(
-                model_path,
-                input_path,
-                max_rows=rows,
-                manual_position_id=manual_position,
+        model_path = _resolve_input(
+            model_mode,
+            model_repository_path,
+            model_upload,
+            f"Task {task_id} checkpoint",
+            temp_directories,
+        )
+        data_path = _resolve_input(
+            data_mode,
+            data_repository_path,
+            data_upload,
+            f"Task {task_id} input",
+            temp_directories,
+        )
+        runtime = get_runtime()
+        with runtime.lock:
+            if task_id == 1:
+                return runtime.engine.predict_task1(
+                    model_path,
+                    data_path,
+                    max_rows=max_rows,
+                    manual_position_id=POSITION_OPTIONS.get(position_name),
+                )
+            if task_id == 2:
+                return runtime.engine.predict_task2(model_path, data_path)
+            return runtime.engine.predict_task3(model_path, data_path)
+    finally:
+        for directory in temp_directories:
+            shutil.rmtree(directory, ignore_errors=True)
+
+
+def _source_controls(task_id: int, data_types: list[str]):
+    model_candidates = _model_candidates(task_id)
+    example_candidates = _example_candidates(task_id)
+
+    model_mode = st.radio(
+        "Model source",
+        ["Repository file", "Upload file"],
+        horizontal=True,
+        key=f"model_mode_{task_id}",
+    )
+    model_path = None
+    model_upload = None
+    if model_mode == "Repository file":
+        model_path = st.selectbox(
+            "Model checkpoint",
+            options=model_candidates,
+            format_func=_display_path,
+            index=0 if model_candidates else None,
+            placeholder="No checkpoint found in models/",
+            key=f"model_repo_{task_id}",
+        )
+        if not model_candidates:
+            st.warning("No .pth or .pt file was found in models/.")
+    else:
+        model_upload = st.file_uploader(
+            "Model checkpoint",
+            type=["pth", "pt"],
+            key=f"model_upload_{task_id}",
+        )
+
+    data_mode = st.radio(
+        "Input source",
+        ["Repository file", "Upload file"],
+        horizontal=True,
+        key=f"data_mode_{task_id}",
+    )
+    data_path = None
+    data_upload = None
+    if data_mode == "Repository file":
+        data_path = st.selectbox(
+            "Input sample",
+            options=example_candidates,
+            format_func=_display_path,
+            index=0 if example_candidates else None,
+            placeholder=f"No sample found in examples/task{task_id}/",
+            key=f"data_repo_{task_id}",
+        )
+        if not example_candidates:
+            st.warning(f"No compatible file was found in examples/task{task_id}/.")
+    else:
+        data_upload = st.file_uploader(
+            "Input sample",
+            type=data_types,
+            key=f"data_upload_{task_id}",
+        )
+
+    return model_mode, model_path, model_upload, data_mode, data_path, data_upload
+
+
+def _classification_tab(task_id: int, title: str, note: str) -> None:
+    input_column, output_column = st.columns([0.42, 0.58], gap="large")
+    with input_column:
+        st.markdown(f"### {title}")
+        with st.form(f"task_{task_id}_form", border=False):
+            controls = _source_controls(task_id, ["npy"])
+            submitted = st.form_submit_button(
+                "Run Static Recognition" if task_id == 2 else "Run Dynamic Recognition",
+                type="primary",
+                use_container_width=True,
             )
-    except Exception as exc:
-        raise gr.Error(f"{type(exc).__name__}: {exc}") from exc
-    return _pack_result(result)
+        st.caption(note)
+
+    if submitted:
+        try:
+            with st.spinner("Loading checkpoint and running inference…"):
+                st.session_state[f"task_{task_id}_result"] = _run_task(
+                    task_id,
+                    *controls,
+                )
+        except Exception as exc:
+            st.session_state.pop(f"task_{task_id}_result", None)
+            st.error(f"{type(exc).__name__}: {exc}")
+
+    with output_column:
+        result = st.session_state.get(f"task_{task_id}_result")
+        if result is None:
+            _render_empty()
+        else:
+            _render_result(result)
 
 
-def run_static(model_file, input_file):
-    model_path = _path_from_upload(model_file, "the Task 2 model checkpoint")
-    input_path = _path_from_upload(input_file, "the static NPY sample")
-    try:
-        with INFERENCE_LOCK:
-            result = ENGINE.predict_task2(model_path, input_path)
-    except Exception as exc:
-        raise gr.Error(f"{type(exc).__name__}: {exc}") from exc
-    return _pack_result(result)
+st.set_page_config(
+    page_title="PI-MFS Framework",
+    page_icon="〽️",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
+st.markdown(
+    """
+    <style>
+      .stApp { background: #f4f7fb; }
+      .block-container { max-width: 1500px; padding-top: 1.2rem; padding-bottom: 2.5rem; }
+      .pi-header {
+        display: flex; justify-content: space-between; align-items: center;
+        gap: 1.5rem; padding: 1.35rem 1.6rem; margin-bottom: 1rem;
+        color: white; background: #07162d; border-radius: 1rem;
+      }
+      .pi-kicker { color: #9ee7df; font-size: .78rem; font-weight: 800; letter-spacing: .12em; }
+      .pi-title { margin-top: .2rem; font-family: Georgia, serif; font-size: 2rem; font-weight: 800; }
+      .pi-subtitle { color: #d4e1ee; font-size: .95rem; }
+      .device-pill { padding: .55rem .75rem; border: 1px solid rgba(255,255,255,.22); border-radius: 999px; color: #dff9f6; }
+      .result-box { min-height: 8.5rem; padding: 1.1rem 1.25rem; margin-bottom: .8rem; border: 1px solid #dce5ee; border-radius: .85rem; background: white; box-shadow: 0 12px 30px rgba(20,43,72,.06); }
+      .result-kicker { color: #087f8c; font-size: .72rem; font-weight: 800; letter-spacing: .12em; }
+      .result-value { margin: .2rem 0 .35rem; color: #075f6c; font-family: Georgia, serif; font-size: 2.6rem; font-weight: 800; }
+      .result-detail { color: #53657a; }
+      .result-confidence { margin-top: .4rem; color: #172033; }
+      .empty-box { display: grid; place-content: center; min-height: 24rem; padding: 2rem; text-align: center; color: #6f7f91; border: 1px dashed #b9c8d5; border-radius: .85rem; background: rgba(255,255,255,.7); }
+      .empty-title { margin-bottom: .35rem; color: #26384d; font-family: Georgia, serif; font-size: 1.35rem; font-weight: 800; }
+      div[data-testid="stForm"] { padding: 0; border: 0; }
+      div[data-testid="stMetric"] { padding: .7rem; border: 1px solid #e0e8ef; border-radius: .7rem; background: white; }
+      @media (max-width: 760px) { .pi-header { align-items: flex-start; flex-direction: column; } .result-value { font-size: 2rem; } }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-def run_dynamic(model_file, input_file):
-    model_path = _path_from_upload(model_file, "the Task 3 model checkpoint")
-    input_path = _path_from_upload(input_file, "the dynamic NPY sample")
-    try:
-        with INFERENCE_LOCK:
-            result = ENGINE.predict_task3(model_path, input_path)
-    except Exception as exc:
-        raise gr.Error(f"{type(exc).__name__}: {exc}") from exc
-    return _pack_result(result)
-
-
-def _header_html() -> str:
-    repository = (
-        f'<a href="{html.escape(REPOSITORY_URL, quote=True)}" target="_blank" '
-        'rel="noreferrer">View repository</a>'
-        if REPOSITORY_URL
-        else ""
-    )
-    return f"""
+st.markdown(
+    f"""
     <header class="pi-header">
       <div>
-        <h1>{APP_TITLE}</h1>
-        <p>Physical-Information-Driven Framework for Multidimensional Fiber Sensing</p>
+        <div class="pi-kicker">MULTIDIMENSIONAL FIBER SENSING</div>
+        <div class="pi-title">PI-MFS Framework</div>
+        <div class="pi-subtitle">Physical-Information-Driven Framework for Multidimensional Fiber Sensing</div>
       </div>
-      {repository}
+      <div class="device-pill">{html.escape(get_runtime().engine.device_name)}</div>
     </header>
-    """
+    """,
+    unsafe_allow_html=True,
+)
 
+pressure_tab, static_tab, dynamic_tab = st.tabs(
+    ["Task 1 · Pressure", "Task 2 · Static", "Task 3 · Dynamic"]
+)
 
-def _result_components():
-    result = gr.HTML(
-        '<div class="result-summary"><h2>—</h2><p>Select a model checkpoint and an input file.</p></div>',
-        label="Recognition Result",
-    )
-    plot = gr.Plot(label="Analysis")
-    table = gr.Dataframe(
-        headers=["Metric / Class", "Value / Probability"],
-        datatype=["str", "str"],
-        interactive=False,
-        label="Metrics",
-    )
-    source = gr.Markdown("Ready", elem_classes=["task-note"])
-    return result, plot, table, source
-
-
-with gr.Blocks(title=APP_TITLE, css=CSS) as demo:
-    gr.HTML(_header_html())
-
-    with gr.Tabs():
-        with gr.Tab("Task 1 · Pressure"):
-            with gr.Row(equal_height=False):
-                with gr.Column(scale=5, min_width=340, elem_classes=["pi-card", "pi-input"]):
-                    gr.Markdown("### Model and input")
-                    task1_model = gr.File(
-                        label="Pressure model",
-                        file_types=[".pth", ".pt"],
-                        type="filepath",
-                    )
-                    task1_input = gr.File(
-                        label="Raw strain input",
-                        file_types=[".tsv", ".txt", ".npy"],
-                        type="filepath",
-                    )
-                    task1_rows = gr.Number(
-                        label="Inference rows (0 = all)",
-                        value=256,
-                        minimum=0,
-                        precision=0,
-                    )
-                    task1_position = gr.Dropdown(
-                        label="Force position",
-                        choices=list(POSITION_OPTIONS),
-                        value="Automatic position recognition",
-                    )
-                    task1_run = gr.Button("Run Pressure Prediction", variant="primary")
-                    gr.Markdown(
-                        "The raw OFDR TSV is reconstructed into 30×38 matrices using parameters stored in the checkpoint.",
-                        elem_classes=["task-note"],
-                    )
-                with gr.Column(scale=8, min_width=520, elem_classes=["pi-card", "pi-output"]):
-                    task1_outputs = _result_components()
-
-            task1_run.click(
-                fn=run_pressure,
-                inputs=[task1_model, task1_input, task1_rows, task1_position],
-                outputs=list(task1_outputs),
-                api_name="predict_pressure",
+with pressure_tab:
+    input_column, output_column = st.columns([0.42, 0.58], gap="large")
+    with input_column:
+        st.markdown("### Pressure prediction")
+        with st.form("task_1_form", border=False):
+            task1_controls = _source_controls(1, ["tsv", "txt", "npy"])
+            maximum_rows = st.number_input(
+                "Inference rows (0 = all)",
+                min_value=0,
+                max_value=100000,
+                value=256,
+                step=1,
             )
-
-        with gr.Tab("Task 2 · Static"):
-            with gr.Row(equal_height=False):
-                with gr.Column(scale=5, min_width=340, elem_classes=["pi-card", "pi-input"]):
-                    gr.Markdown("### Model and input")
-                    task2_model = gr.File(
-                        label="Static model",
-                        file_types=[".pth", ".pt"],
-                        type="filepath",
-                    )
-                    task2_input = gr.File(
-                        label="2D sample",
-                        file_types=[".npy"],
-                        type="filepath",
-                    )
-                    task2_run = gr.Button("Run Static Recognition", variant="primary")
-                    gr.Markdown(
-                        "The webpage accepts the same normalized 30×38 NPY sample format as the desktop program.",
-                        elem_classes=["task-note"],
-                    )
-                with gr.Column(scale=8, min_width=520, elem_classes=["pi-card", "pi-output"]):
-                    task2_outputs = _result_components()
-
-            task2_run.click(
-                fn=run_static,
-                inputs=[task2_model, task2_input],
-                outputs=list(task2_outputs),
-                api_name="predict_static",
+            position_name = st.selectbox(
+                "Force position",
+                options=list(POSITION_OPTIONS),
+                index=0,
             )
-
-        with gr.Tab("Task 3 · Dynamic"):
-            with gr.Row(equal_height=False):
-                with gr.Column(scale=5, min_width=340, elem_classes=["pi-card", "pi-input"]):
-                    gr.Markdown("### Model and input")
-                    task3_model = gr.File(
-                        label="Dynamic model",
-                        file_types=[".pth", ".pt"],
-                        type="filepath",
-                    )
-                    task3_input = gr.File(
-                        label="3D sample",
-                        file_types=[".npy"],
-                        type="filepath",
-                    )
-                    task3_run = gr.Button("Run Dynamic Recognition", variant="primary")
-                    gr.Markdown(
-                        "The webpage accepts the original 30×38×50 dynamic sample without rebuilding the database.",
-                        elem_classes=["task-note"],
-                    )
-                with gr.Column(scale=8, min_width=520, elem_classes=["pi-card", "pi-output"]):
-                    task3_outputs = _result_components()
-
-            task3_run.click(
-                fn=run_dynamic,
-                inputs=[task3_model, task3_input],
-                outputs=list(task3_outputs),
-                api_name="predict_dynamic",
+            task1_submitted = st.form_submit_button(
+                "Run Pressure Prediction",
+                type="primary",
+                use_container_width=True,
             )
+        st.caption(
+            "The raw OFDR TSV is reconstructed into 30×38 matrices using parameters stored in the Task 1 checkpoint."
+        )
 
+    if task1_submitted:
+        try:
+            with st.spinner("Loading checkpoint and running inference…"):
+                st.session_state["task_1_result"] = _run_task(
+                    1,
+                    *task1_controls,
+                    max_rows=None if maximum_rows == 0 else int(maximum_rows),
+                    position_name=position_name,
+                )
+        except Exception as exc:
+            st.session_state.pop("task_1_result", None)
+            st.error(f"{type(exc).__name__}: {exc}")
 
-demo.queue(default_concurrency_limit=1)
+    with output_column:
+        task1_result = st.session_state.get("task_1_result")
+        if task1_result is None:
+            _render_empty()
+        else:
+            _render_result(task1_result)
 
-
-if __name__ == "__main__":
-    demo.launch(
-        server_name=os.getenv("GRADIO_SERVER_NAME", "0.0.0.0"),
-        server_port=int(os.getenv("PORT", "7860")),
-        show_error=True,
+with static_tab:
+    _classification_tab(
+        2,
+        "Static recognition",
+        "Select a 30×38 NPY sample from the repository or upload a compatible file.",
     )
+
+with dynamic_tab:
+    _classification_tab(
+        3,
+        "Dynamic recognition",
+        "Select a 30×38×50 NPY sample from the repository or upload a compatible file.",
+    )
+
