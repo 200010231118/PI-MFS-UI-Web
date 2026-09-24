@@ -497,6 +497,7 @@ st.markdown(
         width: min(25rem, 43vw); padding: .65rem .85rem;
         border: 1px solid rgba(255,255,255,.25); border-radius: .8rem;
         background: rgba(255,255,255,.96);
+        transform: translateY(.5rem);
       }
       .logo-panel img { display: block; width: 100%; height: auto; object-fit: contain; }
       .logo-panel .university-logo { max-height: 4.2rem; }
@@ -512,7 +513,7 @@ st.markdown(
       div[data-testid="stMetric"] { padding: .7rem; border: 1px solid #e0e8ef; border-radius: .7rem; background: white; }
       @media (max-width: 760px) {
         .pi-header { align-items: flex-start; flex-direction: column; }
-        .logo-panel { width: 100%; }
+        .logo-panel { width: 100%; transform: none; }
         .result-value { font-size: 2rem; }
       }
     </style>
