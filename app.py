@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import html
 import os
 from pathlib import Path
@@ -25,6 +26,7 @@ from inference_engine import InferenceResult, MambaInferenceEngine
 ROOT = Path(__file__).resolve().parent
 MODEL_DIR = ROOT / "models"
 EXAMPLE_DIR = ROOT / "examples"
+ASSET_DIR = ROOT / "assets"
 
 POSITION_OPTIONS = {
     "Automatic position recognition": None,
@@ -104,6 +106,14 @@ def _display_path(path: Path) -> str:
         return path.relative_to(ROOT).as_posix()
     except ValueError:
         return path.name
+
+
+def _image_data_uri(path: Path) -> str:
+    """Embed a repository image in the custom header without an extra server route."""
+    if not path.is_file():
+        return ""
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
 def _save_upload(uploaded_file, temp_directories: list[Path]) -> Path:
@@ -481,7 +491,16 @@ st.markdown(
       .pi-kicker { color: #9ee7df; font-size: .78rem; font-weight: 800; letter-spacing: .12em; }
       .pi-title { margin-top: .2rem; font-family: Georgia, serif; font-size: 2rem; font-weight: 800; }
       .pi-subtitle { color: #d4e1ee; font-size: .95rem; }
-      .device-pill { padding: .55rem .75rem; border: 1px solid rgba(255,255,255,.22); border-radius: 999px; color: #dff9f6; }
+      .runtime-line { margin-top: .55rem; color: #9ee7df; font-size: .78rem; font-weight: 700; letter-spacing: .04em; }
+      .logo-panel {
+        display: flex; flex-direction: column; justify-content: center; gap: .45rem;
+        width: min(25rem, 43vw); padding: .65rem .85rem;
+        border: 1px solid rgba(255,255,255,.25); border-radius: .8rem;
+        background: rgba(255,255,255,.96);
+      }
+      .logo-panel img { display: block; width: 100%; height: auto; object-fit: contain; }
+      .logo-panel .university-logo { max-height: 4.2rem; }
+      .logo-panel .institute-logo { max-height: 3rem; padding-top: .35rem; border-top: 1px solid #e2e8ef; }
       .result-box { min-height: 8.5rem; padding: 1.1rem 1.25rem; margin-bottom: .8rem; border: 1px solid #dce5ee; border-radius: .85rem; background: white; box-shadow: 0 12px 30px rgba(20,43,72,.06); }
       .result-kicker { color: #087f8c; font-size: .72rem; font-weight: 800; letter-spacing: .12em; }
       .result-value { margin: .2rem 0 .35rem; color: #075f6c; font-family: Georgia, serif; font-size: 2.6rem; font-weight: 800; }
@@ -491,7 +510,11 @@ st.markdown(
       .empty-title { margin-bottom: .35rem; color: #26384d; font-family: Georgia, serif; font-size: 1.35rem; font-weight: 800; }
       div[data-testid="stForm"] { padding: 0; border: 0; }
       div[data-testid="stMetric"] { padding: .7rem; border: 1px solid #e0e8ef; border-radius: .7rem; background: white; }
-      @media (max-width: 760px) { .pi-header { align-items: flex-start; flex-direction: column; } .result-value { font-size: 2rem; } }
+      @media (max-width: 760px) {
+        .pi-header { align-items: flex-start; flex-direction: column; }
+        .logo-panel { width: 100%; }
+        .result-value { font-size: 2rem; }
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -504,8 +527,12 @@ st.markdown(
         <div class="pi-kicker">MULTIDIMENSIONAL FIBER SENSING</div>
         <div class="pi-title">PI-MFS Framework</div>
         <div class="pi-subtitle">Physical-Information-Driven Framework for Multidimensional Fiber Sensing</div>
+        <div class="runtime-line">Runtime device · {html.escape(get_runtime().engine.device_name)}</div>
       </div>
-      <div class="device-pill">{html.escape(get_runtime().engine.device_name)}</div>
+      <div class="logo-panel" aria-label="Institutional affiliations">
+        <img class="university-logo" src="{_image_data_uri(ASSET_DIR / 'northeastern_university_logo.png')}" alt="Northeastern University">
+        <img class="institute-logo" src="{_image_data_uri(ASSET_DIR / 'institute_logo.png')}" alt="Research institute">
+      </div>
     </header>
     """,
     unsafe_allow_html=True,
@@ -575,4 +602,3 @@ with dynamic_tab:
         "Dynamic recognition",
         "Select a 30×38×50 NPY sample from the repository or upload a compatible file.",
     )
-
